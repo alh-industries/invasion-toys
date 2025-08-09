@@ -12,3 +12,8 @@ pay special attention to capturing all articles authored by:
 
 
 When scraping content, put the text of each article in its own .txt or .md file
+
+
+for reference: 
+- article urls = blog.invasiontoys.com/{article-slug} 
+- author urls = blog.invasiontoys.com/author/{brianbakerdigital}
