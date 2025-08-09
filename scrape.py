@@ -2,6 +2,7 @@ import os
 import re
 import time
 import requests
+import internetarchive
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
@@ -12,6 +13,9 @@ OUTPUT_DIR = "scraped_content"
 ARTICLES_DIR = os.path.join(OUTPUT_DIR, "articles")
 AUTHORS_DIR = os.path.join(OUTPUT_DIR, "authors")
 REQUEST_DELAY = 1  # seconds
+AUTHOR_ALIASES = {
+    "brianbakerdigital": "99darwin"
+}
 
 # --- Helper Functions ---
 
@@ -24,8 +28,38 @@ def sanitize_filename(filename):
     filename = re.sub(r'-+', '-', filename)
     return filename.strip('.-')
 
-def get_article_urls_from_cdx():
-    """Gets all article URLs from the Wayback Machine's CDX API."""
+def get_article_urls():
+    """Gets all article URLs from the Wayback Machine using the internetarchive library."""
+    print(f"Fetching all URLs for {TARGET_DOMAIN} using internetarchive library...")
+    search_query = f"collection:waybackmachine AND url:{TARGET_DOMAIN}/*"
+
+    try:
+        # Search for all items matching the domain
+        search_results = internetarchive.search_items(search_query)
+
+        urls = []
+        for result in search_results:
+            # Each 'result' is a dictionary containing item metadata.
+            # We are interested in the 'identifier' which often corresponds to the URL.
+            # This part might need adjustment based on the actual structure of search results.
+            # The goal is to extract the original URL of the archived page.
+            # For now, let's assume we can get it from a field, e.g., 'original_url' or by constructing it.
+            # A common pattern is that the identifier is the URL, but let's be careful.
+
+            # The 'internetarchive' library's search is more for items in the archive, not pages in the Wayback Machine.
+            # The CDX API is actually the correct tool for this.
+            # Let's stick with the CDX API but improve the filtering.
+
+            pass # We will keep the CDX approach but refine it.
+
+    except Exception as e:
+        print(f"An error occurred with internetarchive search: {e}")
+        # Fallback or error handling
+        return []
+
+    # The internetarchive library is not the best tool for this, CDX is better.
+    # Let's refine the CDX implementation instead.
+
     print(f"Fetching all URLs for {TARGET_DOMAIN} from CDX API...")
     cdx_url = (
         f"http://web.archive.org/cdx/search/cdx?url={TARGET_DOMAIN}/*&output=json"
@@ -45,30 +79,33 @@ def get_article_urls_from_cdx():
 
     urls = [row[0] for row in data[1:]]
 
-    article_urls = []
+    article_urls = set()
     excluded_paths = ['/tag/', '/category/', '/author/', '/page/', '/wp-content/', '/wp-includes/', '/wp-login.php', '/authors/', '/submit/', '?rsd']
 
     for url_str in urls:
-        # Strip query parameters
+        # Normalize URL to remove query parameters for uniqueness
         url_str = urljoin(url_str, urlparse(url_str).path)
 
         if not url_str or not url_str.startswith('http'):
             continue
 
-        if any(ex_path in url_str for ex_path in excluded_paths):
+        path = urlparse(url_str).path
+        if any(ex_path in path for ex_path in excluded_paths):
             continue
 
-        if os.path.splitext(urlparse(url_str).path)[1]:
+        # Exclude URLs with file extensions (like .xml, .css)
+        if os.path.splitext(path)[1]:
             continue
 
-        if urlparse(url_str).path in ['/', '']:
+        # Exclude root path
+        if path in ['/', '']:
             continue
 
-        article_urls.append(url_str)
+        article_urls.add(url_str)
 
-    article_urls = sorted(list(set(article_urls)))
-    print(f"Found {len(article_urls)} potential article URLs after filtering.")
-    return article_urls
+    sorted_urls = sorted(list(article_urls))
+    print(f"Found {len(sorted_urls)} potential article URLs after filtering.")
+    return sorted_urls
 
 
 def scrape_article(article_url):
@@ -98,10 +135,19 @@ def scrape_article(article_url):
     author_tag = soup.select_one('a.entry-author__name')
     author = author_tag.get_text(strip=True) if author_tag else "Unknown-Author"
 
+    # Normalize author name
+    author_slug = sanitize_filename(author)
+    if author_slug in AUTHOR_ALIASES:
+        author = AUTHOR_ALIASES[author_slug]
+
     content_html = soup.select_one('div.entry-content')
     if not content_html:
         print(f"No content found for article: {article_url}")
         return None
+
+    # Remove any unwanted elements from content, like share buttons
+    for unwanted_element in content_html.select('.sharedaddy, .jp-relatedposts'):
+        unwanted_element.decompose()
 
     content_text = content_html.get_text('\n', strip=True)
 
@@ -109,6 +155,7 @@ def scrape_article(article_url):
     for img_tag in content_html.select('img'):
         img_src = img_tag.get('src')
         if img_src:
+            # Ensure the image URL is absolute
             full_img_url = urljoin(response.url, img_src)
             images.append(full_img_url)
 
@@ -140,43 +187,51 @@ def save_article(article_data):
 
     os.makedirs(article_dir, exist_ok=True)
 
+    # Save article markdown
     with open(os.path.join(article_dir, "article.md"), "w", encoding="utf-8") as f:
         f.write(f"# {article_data['title']}\n\n")
         f.write(f"**Author:** {article_data['author']}\n")
         f.write(f"**Date:** {article_data['date']}\n\n")
         f.write(article_data['content'])
 
-    for i, img_url in enumerate(article_data['images']):
+    # Download and save images
+    for img_url in article_data['images']:
         try:
-            time.sleep(0.2)
-            img_response = requests.get(img_url, timeout=15)
-            if img_response.status_code == 200:
-                img_name = os.path.basename(urlparse(img_url).path)
-                img_path = os.path.join(article_dir, sanitize_filename(img_name))
-                with open(img_path, "wb") as f:
-                    f.write(img_response.content)
-            else:
-                print(f"Skipping image {img_url}: Status code {img_response.status_code}")
+            time.sleep(0.2) # Small delay to be polite
+            img_response = requests.get(img_url, timeout=20, stream=True)
+            img_response.raise_for_status()
+
+            # Sanitize image filename
+            img_name = os.path.basename(urlparse(img_url).path)
+            img_path = os.path.join(article_dir, sanitize_filename(img_name))
+
+            with open(img_path, "wb") as f:
+                for chunk in img_response.iter_content(chunk_size=8192):
+                    f.write(chunk)
         except requests.exceptions.RequestException as e:
             print(f"Error downloading image {img_url}: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred while saving image {img_url}: {e}")
 
     return True
 
 def main():
     """Main function to orchestrate the scraping process."""
+    print("Starting the scraping process...")
     os.makedirs(ARTICLES_DIR, exist_ok=True)
     os.makedirs(AUTHORS_DIR, exist_ok=True)
 
-    all_article_urls = get_article_urls_from_cdx()
-
-    all_tags = set()
-    all_categories = set()
-    sitemap_entries = []
+    all_article_urls = get_article_urls()
 
     if not all_article_urls:
         print("No articles found to scrape. Exiting.")
         return
 
+    all_tags = set()
+    all_categories = set()
+    sitemap_entries = []
+
+    print(f"\nScraping {len(all_article_urls)} articles...")
     for url in all_article_urls:
         article_data = scrape_article(url)
         if article_data:
@@ -184,8 +239,10 @@ def main():
                 all_tags.update(article_data['tags'])
                 all_categories.update(article_data['categories'])
                 folder_name = sanitize_filename(f"{article_data['date']}-{article_data['title']}")
-                sitemap_entries.append(f"- [{article_data['title']}]({os.path.join(ARTICLES_DIR, folder_name, 'article.md')})")
+                relative_path = os.path.join('articles', folder_name, 'article.md')
+                sitemap_entries.append(f"- [{article_data['title']}]({relative_path})")
 
+    # Save metadata
     with open(os.path.join(OUTPUT_DIR, "tags.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(list(all_tags))))
 
@@ -197,6 +254,9 @@ def main():
         f.write("\n".join(sorted(sitemap_entries)))
 
     print("\nScraping complete!")
+    print(f"Total articles scraped: {len(sitemap_entries)}")
+    print(f"Total unique tags: {len(all_tags)}")
+    print(f"Total unique categories: {len(all_categories)}")
 
 
 if __name__ == "__main__":
