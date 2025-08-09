@@ -17,3 +17,6 @@ When scraping content, put the text of each article in its own .txt or .md file
 for reference: 
 - article urls = blog.invasiontoys.com/{article-slug} 
 - author urls = blog.invasiontoys.com/author/{brianbakerdigital}
+
+api / tools:
+- https://archive.org/developers/index-apis.html
