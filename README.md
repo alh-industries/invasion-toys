@@ -3,6 +3,12 @@
 capture and scrape all content from the deprecated blog.invasiontoys.com prior to 2023
 - use any relevant tools, in particular archive.org https://web.archive.org/web/20220000000000*/blog.invasiontoys.com
 
+relevant timestamps: 
+- first wayback archive: https://web.archive.org/web/20201101012911/https://blog.invasiontoys.com/
+- last archive with author:brianbakerdigital https://web.archive.org/web/20211128180910/https://blog.invasiontoys.com/
+- first archive where author:brianbakerdigital was changed to author:darwin99 https://web.archive.org/web/20220128194603/https://blog.invasiontoys.com/
+- final wayback archive: https://web.archive.org/web/20220819194103/https://blog.invasiontoys.com/
+
 
 pay special attention to capturing all articles authored by: 
 - author/[brianbakerdigital/](https://web.archive.org/web/20211021175820/https://blog.invasiontoys.com/author/brianbakerdigital/)
