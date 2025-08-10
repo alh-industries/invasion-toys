@@ -2,9 +2,10 @@ import os
 import re
 import time
 import requests
-import internetarchive
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- Constants ---
 BASE_URL = "https://web.archive.org"
@@ -28,46 +29,30 @@ def sanitize_filename(filename):
     filename = re.sub(r'-+', '-', filename)
     return filename.strip('.-')
 
-def get_article_urls():
-    """Gets all article URLs from the Wayback Machine using the internetarchive library."""
-    print(f"Fetching all URLs for {TARGET_DOMAIN} using internetarchive library...")
-    search_query = f"collection:waybackmachine AND url:{TARGET_DOMAIN}/*"
+def create_session_with_retries():
+    """Creates a requests.Session with retry logic."""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
-    try:
-        # Search for all items matching the domain
-        search_results = internetarchive.search_items(search_query)
 
-        urls = []
-        for result in search_results:
-            # Each 'result' is a dictionary containing item metadata.
-            # We are interested in the 'identifier' which often corresponds to the URL.
-            # This part might need adjustment based on the actual structure of search results.
-            # The goal is to extract the original URL of the archived page.
-            # For now, let's assume we can get it from a field, e.g., 'original_url' or by constructing it.
-            # A common pattern is that the identifier is the URL, but let's be careful.
-
-            # The 'internetarchive' library's search is more for items in the archive, not pages in the Wayback Machine.
-            # The CDX API is actually the correct tool for this.
-            # Let's stick with the CDX API but improve the filtering.
-
-            pass # We will keep the CDX approach but refine it.
-
-    except Exception as e:
-        print(f"An error occurred with internetarchive search: {e}")
-        # Fallback or error handling
-        return []
-
-    # The internetarchive library is not the best tool for this, CDX is better.
-    # Let's refine the CDX implementation instead.
-
+def get_article_urls(session):
+    """Gets all article URLs from the Wayback Machine using the CDX API."""
     print(f"Fetching all URLs for {TARGET_DOMAIN} from CDX API...")
     cdx_url = (
         f"http://web.archive.org/cdx/search/cdx?url={TARGET_DOMAIN}/*&output=json"
-        "&fl=original&filter=mimetype:text/html&filter=statuscode:200&collapse=urlkey"
+        "&fl=timestamp,original&filter=mimetype:text/html&filter=statuscode:200&collapse=urlkey"
     )
 
     try:
-        response = requests.get(cdx_url, timeout=60)
+        response = session.get(cdx_url, timeout=60)
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
@@ -77,19 +62,25 @@ def get_article_urls():
         print("Error parsing JSON from CDX API response.")
         return []
 
-    urls = [row[0] for row in data[1:]]
+    # Skip header row and process data
+    article_snapshots = [tuple(row) for row in data[1:]]
 
-    article_urls = set()
+    filtered_articles = []
+    seen_urls = set()
     excluded_paths = ['/tag/', '/category/', '/author/', '/page/', '/wp-content/', '/wp-includes/', '/wp-login.php', '/authors/', '/submit/', '?rsd']
 
-    for url_str in urls:
+    # Iterate in reverse to get the latest snapshots first
+    for timestamp, url_str in reversed(article_snapshots):
         # Normalize URL to remove query parameters for uniqueness
-        url_str = urljoin(url_str, urlparse(url_str).path)
+        normalized_url = urljoin(url_str, urlparse(url_str).path)
 
-        if not url_str or not url_str.startswith('http'):
+        if not normalized_url or not normalized_url.startswith('http'):
             continue
 
-        path = urlparse(url_str).path
+        if normalized_url in seen_urls:
+            continue
+
+        path = urlparse(normalized_url).path
         if any(ex_path in path for ex_path in excluded_paths):
             continue
 
@@ -101,21 +92,24 @@ def get_article_urls():
         if path in ['/', '']:
             continue
 
-        article_urls.add(url_str)
+        filtered_articles.append((timestamp, normalized_url))
+        seen_urls.add(normalized_url)
 
-    sorted_urls = sorted(list(article_urls))
-    print(f"Found {len(sorted_urls)} potential article URLs after filtering.")
-    return sorted_urls
+    # The CDX API with collapse=urlkey should already return unique URLs, but this adds extra safety.
+    print(f"Found {len(filtered_articles)} potential article URLs after filtering.")
+    return filtered_articles
 
 
-def scrape_article(article_url):
+def scrape_article(timestamp, article_url, session):
     """Scrapes a single article page."""
-    wayback_url = f"{BASE_URL}/web/*/{article_url}"
+    wayback_url = f"{BASE_URL}/web/{timestamp}/{article_url}"
     print(f"Scraping article: {wayback_url}")
 
     try:
-        time.sleep(REQUEST_DELAY)
-        response = requests.get(wayback_url, timeout=30)
+        time.sleep(REQUEST_DELAY) # Keep a small polite delay
+        response = session.get(wayback_url, timeout=30)
+
+
         if response.status_code == 404:
             print(f"Article not found (404): {wayback_url}")
             return None
@@ -140,7 +134,7 @@ def scrape_article(article_url):
     if author_slug in AUTHOR_ALIASES:
         author = AUTHOR_ALIASES[author_slug]
 
-    content_html = soup.select_one('div.entry-content')
+    content_html = soup.select_one('div.single-body--content')
     if not content_html:
         print(f"No content found for article: {article_url}")
         return None
@@ -173,7 +167,7 @@ def scrape_article(article_url):
         "tags": list(tags)
     }
 
-def save_article(article_data):
+def save_article(article_data, session):
     """Saves the scraped article data to the specified directory structure."""
     if not article_data:
         return False
@@ -198,7 +192,7 @@ def save_article(article_data):
     for img_url in article_data['images']:
         try:
             time.sleep(0.2) # Small delay to be polite
-            img_response = requests.get(img_url, timeout=20, stream=True)
+            img_response = session.get(img_url, timeout=20, stream=True)
             img_response.raise_for_status()
 
             # Sanitize image filename
@@ -221,7 +215,8 @@ def main():
     os.makedirs(ARTICLES_DIR, exist_ok=True)
     os.makedirs(AUTHORS_DIR, exist_ok=True)
 
-    all_article_urls = get_article_urls()
+    session = create_session_with_retries()
+    all_article_urls = get_article_urls(session)
 
     if not all_article_urls:
         print("No articles found to scrape. Exiting.")
@@ -232,10 +227,10 @@ def main():
     sitemap_entries = []
 
     print(f"\nScraping {len(all_article_urls)} articles...")
-    for url in all_article_urls:
-        article_data = scrape_article(url)
+    for timestamp, url in all_article_urls:
+        article_data = scrape_article(timestamp, url, session)
         if article_data:
-            if save_article(article_data):
+            if save_article(article_data, session):
                 all_tags.update(article_data['tags'])
                 all_categories.update(article_data['categories'])
                 folder_name = sanitize_filename(f"{article_data['date']}-{article_data['title']}")
